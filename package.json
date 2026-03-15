@@ -1,7 +1,7 @@
 {
     "name": "@trh/lens",
     "license": "UNLICENSE",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "scripts": {
         "build": "tsup src/*.ts",
         "clean": "rm -rf ./dist",
@@ -25,7 +25,7 @@
         "typescript": "^5.9.3"
     },
     "dependencies": {
-        "@trh/symbols": "^2.0.0"
+        "@trh/symbols": "^2.0.1"
     },
     "pnpm": {
         "ignoredBuiltDependencies": [
