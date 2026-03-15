@@ -25,7 +25,7 @@
         "typescript": "^5.9.3"
     },
     "dependencies": {
-        "@trh/symbols": "^1.2.1"
+        "@trh/symbols": "^2.0.0"
     },
     "pnpm": {
         "ignoredBuiltDependencies": [
