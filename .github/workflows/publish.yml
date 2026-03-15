@@ -9,6 +9,7 @@ jobs:
         permissions:
             contents: read
             packages: write
+            id-token: write
         steps:
             - name: Setup Repo
               uses: actions/checkout@v4
@@ -20,11 +21,11 @@ jobs:
                   node-version: 24
                   registry-url: "https://registry.npmjs.org"
                   cache: "pnpm"
+            - name: Update npm
+              run: npm install -g npm@latest
             - name: Install Dependencies
               run: pnpm install --frozen-lockfile
             - name: Lint and Build
               run: pnpm run lint && pnpm run build
             - name: Publish
-              run: pnpm publish --no-git-checks
-              env:
-                  NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+              run: pnpm publish --no-git-checks --access public
