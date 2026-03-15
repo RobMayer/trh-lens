@@ -1,6 +1,44 @@
 import { TrhSymbols } from "@trh/symbols";
 
-type LensPathSegment = { type: "property"; key: string } | { type: "index"; index: number } | { type: "accessor"; name: string; args?: unknown[] };
+//#region - Public API
+
+export namespace Lens {
+    export const get = <D, R>(data: D, lens: ($: SelectorLens<D>) => SelectorLensOf<R>): R => {
+        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
+        const result = lens(proxy);
+        return (result as any)[LENS].value;
+    };
+
+    export type Context = { path: LensPathSegment[]; index: number; count: number };
+
+    export const mutate = <D, R>(data: D, lens: ($: MutatorLens<D>) => MutatorLensOf<R>, value: R | ((prev: R, index: number, context: Lens.Context) => R)): void => {
+        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
+        const result = lens(proxy as any);
+        const { path } = (result as any)[LENS] as LensState;
+        if (path.length === 0) return; // can't replace root by reference
+        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Lens.Context) => R) : () => value;
+        doMutate(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
+    };
+
+    export const apply = <D, R>(data: D, lens: ($: ApplierLens<D>) => ApplierLensOf<R>, value: R | ((prev: DeepReadonly<R>, index: number, context: Lens.Context) => R)): D => {
+        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
+        const result = lens(proxy as any);
+        const { path } = (result as any)[LENS] as LensState;
+        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Lens.Context) => R) : () => value;
+        if (path.length === 0) return updater(data as any, 0, { path: [], index: 0, count: 1 }) as any;
+        return doApply(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
+    };
+}
+
+//#endregion
+
+//#region - Symbols
+
+// Distributes keyof over union members: AllStringKeys<A | B> = keyof A | keyof B
+type AllStringKeys<T> = T extends any ? keyof T & string : never;
+
+// Safe lookup across union members: yields the value type where the key exists, undefined elsewhere
+type SafeLookup<T, K extends string> = T extends any ? (K extends keyof T ? T[K] : undefined) : never;
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 type DeepReadonly<T> = T extends Primitive
@@ -15,48 +53,10 @@ type DeepReadonly<T> = T extends Primitive
             ? ReadonlySet<DeepReadonly<U>>
             : { readonly [K in keyof T]: DeepReadonly<T[K]> };
 
+type LensPathSegment = { type: "property"; key: string } | { type: "index"; index: number } | { type: "accessor"; name: string; args?: string[] };
+
 const LENS = Symbol("lens");
 const PRED = Symbol("pred");
-
-//#region - Public API
-
-type Context = { path: LensPathSegment[]; index: number; count: number };
-
-export namespace Lens {
-    export const query = <D, R>(data: D, lens: ($: QueryLens<D>) => SelectorLensOf<R>): R => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
-        const result = lens(proxy);
-        return (result as any)[LENS].value;
-    };
-
-    export const get = <D, R>(data: D, lens: ($: PathLens<D>) => PathLens<R>): R => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
-        const result = lens(proxy);
-        return (result as any)[LENS].value;
-    };
-
-    export const mutate = <D, R>(data: D, lens: ($: MutatorLens<D>) => MutatorLensOf<R>, value: R | ((prev: R, index: number, context: Context) => R)): void => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
-        const result = lens(proxy as any);
-        const { path } = (result as any)[LENS] as LensState;
-        if (path.length === 0) return; // can't replace root by reference
-        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Context) => R) : () => value;
-        doMutate(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
-    };
-
-    export const apply = <D, R>(data: D, lens: ($: ApplierLens<D>) => ApplierLensOf<R>, value: R | ((prev: DeepReadonly<R>, index: number, context: Context) => R)): D => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
-        const result = lens(proxy as any);
-        const { path } = (result as any)[LENS] as LensState;
-        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Context) => R) : () => value;
-        if (path.length === 0) return updater(data as any, 0, { path: [], index: 0, count: 1 }) as any;
-        return doApply(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
-    };
-}
-
-//#endregion
-
-//#region - Internal types
 
 type FilterOp = { type: "where"; predFn: Function } | { type: "filter"; fn: Function } | { type: "slice"; start: number; end?: number } | { type: "sort"; args: any[] };
 
@@ -79,26 +79,178 @@ const unwrap = (arg: unknown): unknown => {
     return lens ? lens.value : arg;
 };
 
-/** Deep-unwrap: extract LENS proxy values, recursing into arrays (for any-of/all-of operands). */
-function unwrapDeep(v: unknown): unknown {
-    const state = (v as any)?.[LENS] as LensState | undefined;
-    if (state !== undefined) return state.value;
-    if (Array.isArray(v)) return v.map(unwrapDeep);
-    return v;
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+function compare(a: unknown, b: unknown): number | null {
+    // 1. Left-side Compare symbol
+    if (a != null && typeof a === "object" && TrhSymbols.Compare in a) {
+        const result = (a as any)[TrhSymbols.Compare](b);
+        if (result !== null && !isNaN(result)) return result;
+    }
+    // 2. Right-side Compare symbol (flipped sign)
+    if (b != null && typeof b === "object" && TrhSymbols.Compare in b) {
+        const result = (b as any)[TrhSymbols.Compare](a);
+        if (result !== null && !isNaN(result)) return -result;
+    }
+    // 3. Numeric comparison
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    if (typeof a === "bigint" && typeof b === "bigint") return Number(a - b);
+    // 4. String comparison with natural collation
+    if (typeof a === "string" && typeof b === "string") return collator.compare(a, b);
+    // 5. Incomparable types
+    return null;
 }
 
+function performEquality(a: unknown, b: unknown): boolean {
+    // 1. Left-side Equals symbol
+    if (a != null && typeof a === "object" && TrhSymbols.Equals in a) {
+        const result = (a as any)[TrhSymbols.Equals](b);
+        if (result !== null) return result;
+    }
+    // 2. Right-side Equals symbol
+    if (b != null && typeof b === "object" && TrhSymbols.Equals in b) {
+        const result = (b as any)[TrhSymbols.Equals](a);
+        if (result !== null) return result;
+    }
+    // 3. Strict equality fallback
+    return a === b;
+}
+
+function resolveTypeOf(value: unknown): string {
+    if (value === null) return "nullish/null";
+    if (value === undefined) return "nullish/undefined";
+    switch (typeof value) {
+        case "number":
+            return "number/native";
+        case "bigint":
+            return "number/bigint";
+        case "boolean":
+            return "boolean";
+        case "string":
+            return "string";
+        case "symbol":
+            return "symbol";
+        case "function":
+            return "function";
+    }
+    // Check custom TypeOf symbol first
+    if (typeof (value as any)[TrhSymbols.TypeOf] === "function") {
+        const custom = (value as any)[TrhSymbols.TypeOf]();
+        if (typeof custom === "string") return custom;
+    }
+    if (Array.isArray(value)) return "array";
+    if (value instanceof Date) return "date";
+    if (value instanceof Set) return "set";
+    if (value instanceof Map) return "map";
+    if (value instanceof RegExp) return "regexp";
+    if (value instanceof Promise) return "promise";
+    if (value instanceof Error) return "error";
+    const tag = (value as any)[Symbol.toStringTag];
+    if (typeof tag === "string") return tag.toLowerCase();
+    return "object";
+}
+
+function convertToString(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    switch (typeof value) {
+        case "string":
+            return value;
+        case "number":
+        case "bigint":
+            return value.toString();
+        case "boolean":
+            return null;
+    }
+    if (Array.isArray(value)) return null;
+    if (typeof (value as any).toString === "function" && (value as any).toString !== Object.prototype.toString) {
+        return (value as any).toString();
+    }
+    return null;
+}
+
+function sortCompare(a: unknown, b: unknown): number {
+    // 1. Compare symbol / native types
+    const cmp = compare(a, b);
+    if (cmp !== null) return cmp;
+
+    // 2. Numeric coercion
+    const numA = Number(a);
+    const numB = Number(b);
+    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+
+    // 3. String fallback
+    return collator.compare(String(a), String(b));
+}
+
+//#endregion
+
+//#region - Operator table
+
+const cmpOp = (test: (c: number) => boolean) => (s: any, o: any) => {
+    const c = compare(s, o);
+    return c !== null && test(c);
+};
+
+const stringOp = (check: (a: string, b: string) => boolean) => (s: any, o: any) => {
+    const a = convertToString(s),
+        b = convertToString(o);
+    return a !== null && b !== null && check(a, b);
+};
+
+const rangeOp = (loTest: (c: number) => boolean, hiTest: (c: number) => boolean) => (s: any, lo: any, hi: any) => {
+    const ord = compare(lo, hi);
+    if (ord === null) return false;
+    const [l, h] = ord <= 0 ? [lo, hi] : [hi, lo];
+    const cL = compare(s, l);
+    const cH = compare(s, h);
+    return cL !== null && cH !== null && loTest(cL) && hiTest(cH);
+};
+
+const OPS: Record<string, (subject: any, operand: any, operand2?: any) => boolean> = {
+    "=": (s, o) => performEquality(s, o),
+    "==": (s, o) => s == o,
+    ">": cmpOp((c) => c > 0),
+    "<": cmpOp((c) => c < 0),
+    ">=": cmpOp((c) => c >= 0),
+    "<=": cmpOp((c) => c <= 0),
+    "%": stringOp((a, b) => a.includes(b)),
+    "%^": stringOp((a, b) => a.toLowerCase().includes(b.toLowerCase())),
+    "%_": stringOp((a, b) => a.startsWith(b)),
+    "%^_": stringOp((a, b) => a.toLowerCase().startsWith(b.toLowerCase())),
+    "_%": stringOp((a, b) => a.endsWith(b)),
+    "_%^": stringOp((a, b) => a.toLowerCase().endsWith(b.toLowerCase())),
+    "~": (s, o) => {
+        const str = convertToString(s);
+        if (str === null) return false;
+        try {
+            return (o instanceof RegExp ? o : new RegExp(o)).test(str);
+        } catch {
+            return false;
+        }
+    },
+    "#": (s, o) => (s != null && typeof s === "object" && TrhSymbols.Contains in s ? (s as any)[TrhSymbols.Contains](o) : Array.isArray(s) ? s.includes(o) : s instanceof Set ? s.has(o) : false),
+    ":": (s, o) => resolveTypeOf(s).startsWith(String(o)),
+    "><": rangeOp((c) => c > 0, (c) => c < 0),
+    ">=<": rangeOp((c) => c >= 0, (c) => c <= 0),
+};
+
+//#endregion
+
+//#region - Predicate evaluation
+
 function evalPredicate(pred: any): boolean {
-    // PredicateResult pass-through (from or/and/not/xor combinators)
+    // PredicateResult pass-through
     if (pred != null && typeof pred === "object" && PRED in pred) return (pred as any)[PRED];
-    const tuple = (pred as unknown[]).map(unwrapDeep);
+
+    const tuple = pred as unknown[];
 
     // Arity 2 — unary
     if (tuple.length === 2) {
-        const val = tuple[0];
+        const val = unwrap(tuple[0]);
         return tuple[1] === "?" ? !!val : !val;
     }
 
-    const subject = tuple[0];
+    const subject = unwrap(tuple[0]);
     const rawOp = tuple[1] as string;
 
     // Parse operator: !prefix, |/& suffix
@@ -124,13 +276,15 @@ function evalPredicate(pred: any): boolean {
     let result: boolean;
 
     if (tuple.length === 4) {
-        result = op(subject, tuple[2], tuple[3]);
+        // Range op — two operands
+        result = op(subject, unwrap(tuple[2]), unwrap(tuple[3]));
     } else if (mode === "single") {
-        result = op(subject, tuple[2]);
+        result = op(subject, unwrap(tuple[2]));
     } else {
+        // any-of or all-of — operand is an array
         const operands = tuple[2] as unknown[];
         const method = mode === "any" ? "some" : "every";
-        result = operands[method]((o: unknown) => op(subject, o));
+        result = operands[method]((o: unknown) => op(subject, unwrap(o)));
     }
 
     return negate ? !result : result;
@@ -209,8 +363,7 @@ function createProxy(state: LensState): any {
                             const arr = isEach ? (value as any[]).flat(1) : (value as any[]);
                             const mapped = (arr ?? [])
                                 .map((item: any) => {
-                                    const elProxy = createProxy({ value: item, isEach: false, path: [], filters: [] });
-                                    const result = callback(elProxy);
+                                    const result = callback(wrapValue(item));
                                     const inner = (result as any)[LENS];
                                     return inner.isEach ? inner.value : [inner.value];
                                 })
@@ -268,11 +421,7 @@ function createProxy(state: LensState): any {
                 //#region - Filtering (accumulate in state.filters, don't record path steps)
                 case "where":
                     return (predFn: Function) => {
-                        const filterArr = (arr: any[]) =>
-                            arr.filter((item) => {
-                                const itemProxy = createProxy({ value: item, isEach: false, path: [], filters: [] });
-                                return evalPredicate(predFn(itemProxy));
-                            });
+                        const filterArr = (arr: any[]) => arr.filter((item) => evalPredicate(predFn(wrapValue(item))));
                         const nextFilters = [...filters, { type: "where" as const, predFn }];
                         if (isEach) return createProxy({ value: (value as any[]).map((v) => filterArr(v)), isEach: true, path, filters: nextFilters });
                         return createProxy({ value: filterArr(value as any[]), isEach: false, path, filters: nextFilters });
@@ -290,29 +439,11 @@ function createProxy(state: LensState): any {
                     return (...args: any[]) => {
                         const sortArr = (arr: any[]) => {
                             if (typeof args[0] === "function" && args.length === 1) {
-                                // Comparator overload
                                 return [...arr].sort(args[0]);
                             }
-                            // Accessor + direction/config overload
-                            const [accessor, dirOrConfig] = args;
-                            const dir = typeof dirOrConfig === "string" ? dirOrConfig : (dirOrConfig?.direction ?? "asc");
-                            const nullish = typeof dirOrConfig === "object" ? (dirOrConfig?.nullish ?? "last") : "last";
-
-                            // Extract sort keys once, then sort with stable tiebreaker
-                            const keyed = arr.map((item, i) => ({ item, key: Lens.get(item, accessor as any), idx: i }));
-                            keyed.sort((a, b) => {
-                                // Nullish handling — independent of direction
-                                const aN = a.key === null || a.key === undefined;
-                                const bN = b.key === null || b.key === undefined;
-                                if (aN || bN) {
-                                    if (aN && bN) return a.idx - b.idx;
-                                    if (aN) return nullish === "first" ? -1 : 1;
-                                    return nullish === "first" ? 1 : -1;
-                                }
-                                const cmp = sortCompare(a.key, b.key);
-                                if (cmp !== 0) return dir === "desc" ? -cmp : cmp;
-                                return a.idx - b.idx; // stable tiebreaker
-                            });
+                            const { dir, nullish } = parseSortArgs(args);
+                            const keyed = arr.map((item, i) => ({ item, key: Lens.get(item, args[0] as any), idx: i }));
+                            sortKeyed(keyed, dir, nullish);
                             return keyed.map((e) => e.item);
                         };
                         const nextFilters = [...filters, { type: "sort" as const, args }];
@@ -383,16 +514,54 @@ function createProxy(state: LensState): any {
 
 //#region - Replay (mutate / apply)
 
+const wrapValue = (item: any): any => createProxy({ value: item, isEach: false, path: [], filters: [] });
+
+function parseSortArgs(args: any[]): { dir: string; nullish: string } {
+    const dirOrConfig = args[1];
+    return {
+        dir: typeof dirOrConfig === "string" ? dirOrConfig : (dirOrConfig?.direction ?? "asc"),
+        nullish: typeof dirOrConfig === "object" ? (dirOrConfig?.nullish ?? "last") : "last",
+    };
+}
+
+function sortKeyed<T extends { key: unknown; idx: number }>(keyed: T[], dir: string, nullish: string): void {
+    keyed.sort((a, b) => {
+        const aN = a.key === null || a.key === undefined;
+        const bN = b.key === null || b.key === undefined;
+        if (aN || bN) {
+            if (aN && bN) return a.idx - b.idx;
+            if (aN) return nullish === "first" ? -1 : 1;
+            return nullish === "first" ? 1 : -1;
+        }
+        const cmp = sortCompare(a.key, b.key);
+        if (cmp !== 0) return dir === "desc" ? -cmp : cmp;
+        return a.idx - b.idx;
+    });
+}
+
+function resolveAtIndex(arr: any[], step: { index: number; filters?: FilterOp[] }): number {
+    if (step.filters?.length) {
+        const indices = matchingIndices(arr, step.filters);
+        const fi = step.index < 0 ? indices.length + step.index : step.index;
+        return indices[fi];
+    }
+    return step.index < 0 ? arr.length + step.index : step.index;
+}
+
+function resolveCallbackPath(step: { callback: Function }, item: any, steps: PathStep[], next: number): PathStep[] {
+    const elProxy = wrapValue(item);
+    const subResult = step.callback(elProxy);
+    const subPath = (subResult as any)[LENS].path as PathStep[];
+    return [...subPath, ...steps.slice(next)];
+}
+
 // Resolve which original indices in `arr` match a chain of accumulated filters
 function matchingIndices(arr: any[], ops: FilterOp[]): number[] {
     let indices = Array.from({ length: arr.length }, (_, i) => i);
     for (const f of ops) {
         switch (f.type) {
             case "where":
-                indices = indices.filter((i) => {
-                    const proxy = createProxy({ value: arr[i], isEach: false, path: [], filters: [] });
-                    return evalPredicate(f.predFn(proxy));
-                });
+                indices = indices.filter((i) => evalPredicate(f.predFn(wrapValue(arr[i]))));
                 break;
             case "filter":
                 indices = indices.filter((i) => (f.fn as Function)(arr[i]));
@@ -409,23 +578,9 @@ function matchingIndices(arr: any[], ops: FilterOp[]): number[] {
                     // Comparator overload
                     indices.sort((a, b) => args[0](arr[a], arr[b]));
                 } else {
-                    // Accessor + direction overload
-                    const [accessor, dirOrConfig] = args;
-                    const dir = typeof dirOrConfig === "string" ? dirOrConfig : (dirOrConfig?.direction ?? "asc");
-                    const nullish = typeof dirOrConfig === "object" ? (dirOrConfig?.nullish ?? "last") : "last";
-                    const keyed = indices.map((i, idx) => ({ i, key: Lens.get(arr[i], accessor as any), idx }));
-                    keyed.sort((a, b) => {
-                        const aN = a.key === null || a.key === undefined;
-                        const bN = b.key === null || b.key === undefined;
-                        if (aN || bN) {
-                            if (aN && bN) return a.idx - b.idx;
-                            if (aN) return nullish === "first" ? -1 : 1;
-                            return nullish === "first" ? 1 : -1;
-                        }
-                        const cmp = sortCompare(a.key, b.key);
-                        if (cmp !== 0) return dir === "desc" ? -cmp : cmp;
-                        return a.idx - b.idx;
-                    });
+                    const { dir, nullish } = parseSortArgs(args);
+                    const keyed = indices.map((i, idx) => ({ i, key: Lens.get(arr[i], args[0] as any), idx }));
+                    sortKeyed(keyed, dir, nullish);
                     indices = keyed.map((e) => e.i);
                 }
                 break;
@@ -436,12 +591,13 @@ function matchingIndices(arr: any[], ops: FilterOp[]): number[] {
 }
 
 const seg = {
+    prop: (key: string): LensPathSegment => ({ type: "property", key }),
     idx: (index: number): LensPathSegment => ({ type: "index", index }),
     acc: (name: string, ...args: string[]): LensPathSegment => (args.length > 0 ? { type: "accessor", name, args } : { type: "accessor", name }),
-    fromPropStep: (key: string | number): LensPathSegment => (typeof key === "number" ? seg.idx(key) : { type: "property", key }),
+    fromPropStep: (key: string | number): LensPathSegment => (typeof key === "number" ? seg.idx(key) : seg.prop(key)),
 };
 
-function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Context) => any, ctx: Context): any {
+function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Lens.Context) => any, ctx: Lens.Context): any {
     if (idx >= steps.length) return updater(current, ctx.index, ctx);
 
     const step = steps[idx];
@@ -459,14 +615,7 @@ function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: a
             return { ...current, [step.key]: child };
         }
         case "at": {
-            let resolved: number;
-            if (step.filters?.length) {
-                const indices = matchingIndices(current, step.filters);
-                const fi = step.index < 0 ? indices.length + step.index : step.index;
-                resolved = indices[fi];
-            } else {
-                resolved = step.index < 0 ? current.length + step.index : step.index;
-            }
+            const resolved = resolveAtIndex(current, step);
             const childCtx = { ...ctx, path: [...ctx.path, seg.idx(resolved)] };
             const child = doApply(current[resolved], steps, next, updater, childCtx);
             const result = [...current];
@@ -476,10 +625,7 @@ function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: a
         case "each": {
             if (step.callback) {
                 const applyToElement = (item: any, j: number, count: number) => {
-                    const elProxy = createProxy({ value: item, isEach: false, path: [], filters: [] });
-                    const subResult = step.callback!(elProxy);
-                    const subPath = (subResult as any)[LENS].path as PathStep[];
-                    const fullPath = [...subPath, ...steps.slice(next)];
+                    const fullPath = resolveCallbackPath(step as { callback: Function }, item, steps, next);
                     return doApply(item, fullPath, 0, updater, { path: [...ctx.path, seg.idx(j)], index: j, count });
                 };
                 if (step.filters?.length) {
@@ -523,13 +669,13 @@ function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: a
     }
 }
 
-function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Context) => any, ctx: Context): void {
+function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Lens.Context) => any, ctx: Lens.Context): void {
     const step = steps[idx];
     const next = idx + 1;
     const atLeaf = next >= steps.length;
 
     // For plain property/index steps, descend or apply at leaf
-    const descend = (parent: any, key: string | number, childCtx: Context) => {
+    const descend = (parent: any, key: string | number, childCtx: Lens.Context) => {
         if (atLeaf) parent[key] = updater(parent[key], childCtx.index, childCtx);
         else doMutate(parent[key], steps, next, updater, childCtx);
     };
@@ -539,24 +685,14 @@ function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: 
             descend(current, step.key, { ...ctx, path: [...ctx.path, seg.fromPropStep(step.key)] });
             break;
         case "at": {
-            let resolved: number;
-            if (step.filters?.length) {
-                const indices = matchingIndices(current, step.filters);
-                const fi = step.index < 0 ? indices.length + step.index : step.index;
-                resolved = indices[fi];
-            } else {
-                resolved = step.index < 0 ? current.length + step.index : step.index;
-            }
+            const resolved = resolveAtIndex(current, step);
             descend(current, resolved, { ...ctx, path: [...ctx.path, seg.idx(resolved)] });
             break;
         }
         case "each": {
             if (step.callback) {
                 const mutateElement = (arr: any[], i: number, j: number, count: number) => {
-                    const elProxy = createProxy({ value: arr[i], isEach: false, path: [], filters: [] });
-                    const subResult = step.callback!(elProxy);
-                    const subPath = (subResult as any)[LENS].path as PathStep[];
-                    const fullPath = [...subPath, ...steps.slice(next)];
+                    const fullPath = resolveCallbackPath(step as { callback: Function }, arr[i], steps, next);
                     doMutate(arr[i], fullPath, 0, updater, { path: [...ctx.path, seg.idx(i)], index: j, count });
                 };
                 if (step.filters?.length) {
@@ -682,16 +818,12 @@ type DataLens<Target, Eval = Target, Chain = Eval> = {
               size(): DataLens<never, WrapEval<Eval, Chain, number>, number>;
           }
         : {}) &
-    // Custom accessors (LensNav — object protocol with access|compute + mutate?/apply?)
-    // access: deterministic navigation — usable on PathLens, DataLens, MutatorLens, ApplierLens
-    // compute: derived value — usable on DataLens only (always read-only, Target = never)
+    // Custom accessors (LensNav — object protocol with select/mutate?/apply?)
     (NonNullable<Chain> extends { [TrhSymbols.LensNav]: infer Methods }
         ? {
-              [M in keyof Methods]: Methods[M] extends { access: (...args: infer A) => infer VT }
+              [M in keyof Methods]: Methods[M] extends { select: (...args: infer A) => infer VT }
                   ? (...args: MapSelectorLensOf<A>) => DataLens<Methods[M] extends { mutate: any } | { apply: any } ? KeepTarget<Target, Chain, VT> : never, WrapEval<Eval, Chain, VT>, VT>
-                  : Methods[M] extends { compute: (...args: infer A) => infer VT }
-                    ? (...args: MapSelectorLensOf<A>) => DataLens<never, WrapEval<Eval, Chain, VT>, VT>
-                    : never;
+                  : never;
           }
         : {});
 
@@ -729,40 +861,9 @@ export type MutatorLensOf<E> = { readonly [BRAND_TARGET]: E; readonly [BRAND_REA
 export type ApplierLensOf<E> = { readonly [BRAND_TARGET]: E; readonly [BRAND_READONLY]?: never };
 
 // Backward compatibility aliases — all three are now DataLens
-export type QueryLens<Eval, Chain = Eval> = DataLens<Eval, Eval, Chain>;
+export type SelectorLens<Eval, Chain = Eval> = DataLens<Eval, Eval, Chain>;
 export type MutatorLens<Target, Chain = Target> = DataLens<Target, Target, Chain>;
 export type ApplierLens<Target, Chain = Target> = DataLens<Target, Target, Chain>;
-
-// SimpleLens — deterministic path navigation for describing fixed paths (e.g., index definitions)
-// Supports: property access, array index/at, Map.get, custom accessors (select only).
-// Excludes: each/where/filter/sort/slice/transform/size/length/keys/values/entries/has — no set ops or computed values.
-export type PathLens<T> = {
-    readonly [BRAND_EVAL]: T;
-} & (NonNullable<T> extends (infer E)[] | readonly (infer E)[] // Array — index access and at()
-    ? {
-          (index: number): PathLens<E>;
-          at(index: number): PathLens<E>;
-      }
-    : {}) &
-    // Any-object — string key access
-    (NonNullable<T> extends object
-        ? {
-              <Key extends AllStringKeys<T>>(key: Key): PathLens<SafeLookup<T, Key>>;
-          }
-        : {}) &
-    // Map — get()
-    (NonNullable<T> extends Map<infer MK, infer MV>
-        ? {
-              get(key: MK): PathLens<MV>;
-          }
-        : {}) &
-    // Custom accessors — access only (deterministic navigation for indexing/mutation paths)
-    // compute-only accessors are excluded — PathLens is for fixed paths, not derived values
-    (NonNullable<T> extends { [TrhSymbols.LensNav]: infer Methods }
-        ? {
-              [M in keyof Methods]: Methods[M] extends { access: (...args: infer A) => infer VT } ? (...args: A) => PathLens<VT> : never;
-          }
-        : {});
 
 //#endregion
 
@@ -819,7 +920,7 @@ type TypeofAnyOfOp = ":|" | "!:|";
 type UnaryOp = "?" | "!?";
 
 // A = 2: unary ops; A = 3: standard ops; A = 4: range ops only
-type OperatorFor<O, A extends 2 | 3 | 4> = A extends 4
+export type OperatorFor<O, A extends 2 | 3 | 4> = A extends 4
     ? O extends number | bigint | string | TrhSymbols.Comparable
         ? RangeOp
         : never
@@ -854,25 +955,25 @@ type OperandFor<O, Op> =
               : // Array contains: RHS is element type
                 Op extends HasOp
                 ? O extends (infer E)[]
-                    ? E | QueryLens<E>
+                    ? E | SelectorLens<E>
                     : O extends Set<infer E>
-                      ? E | QueryLens<E>
+                      ? E | SelectorLens<E>
                       : O extends TrhSymbols.Containable<infer E>
-                        ? E | QueryLens<E>
+                        ? E | SelectorLens<E>
                         : never
                 : Op extends HasAnyOfOp | HasAllOfOp
                   ? O extends (infer E)[]
-                      ? (E | QueryLens<E>)[]
+                      ? (E | SelectorLens<E>)[]
                       : O extends Set<infer E>
-                        ? (E | QueryLens<E>)[]
+                        ? (E | SelectorLens<E>)[]
                         : O extends TrhSymbols.Containable<infer E>
-                          ? (E | QueryLens<E>)[]
+                          ? (E | SelectorLens<E>)[]
                           : never
                   : // Any-of / all-of: RHS is array of O
                     Op extends AnyOfOp
-                    ? (O | QueryLens<O>)[]
+                    ? (O | SelectorLens<O>)[]
                     : // Default: RHS is O
-                          O | QueryLens<O>;
+                          O | SelectorLens<O>;
 
 // --- The Predicate tuple ---
 
@@ -885,189 +986,3 @@ type Predicate<O> =
           operand1: NoInfer<OperandFor<O, OperatorFor<O, 4>>> | SelectorLensOf<any>,
           operand2: NoInfer<OperandFor<O, OperatorFor<O, 4>>> | SelectorLensOf<any>,
       ];
-
-// --- Comparison helpers ---
-
-const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compare(a: unknown, b: unknown): number | null {
-    // 1. Left-side Compare symbol
-    if (a != null && typeof a === "object" && TrhSymbols.Compare in a) {
-        const result = (a as any)[TrhSymbols.Compare](b);
-        if (result !== null && !isNaN(result)) return result;
-    }
-    // 2. Right-side Compare symbol (flipped sign)
-    if (b != null && typeof b === "object" && TrhSymbols.Compare in b) {
-        const result = (b as any)[TrhSymbols.Compare](a);
-        if (result !== null && !isNaN(result)) return -result;
-    }
-    // 3. Numeric comparison
-    if (typeof a === "number" && typeof b === "number") return a - b;
-    if (typeof a === "bigint" && typeof b === "bigint") return Number(a - b);
-    // 4. String comparison with natural collation
-    if (typeof a === "string" && typeof b === "string") return collator.compare(a, b);
-    // 5. Incomparable types
-    return null;
-}
-
-function resolveTypeOf(value: unknown): string {
-    if (value === null) return "nullish/null";
-    if (value === undefined) return "nullish/undefined";
-    switch (typeof value) {
-        case "number":
-            return "number/native";
-        case "bigint":
-            return "number/bigint";
-        case "boolean":
-            return "boolean";
-        case "string":
-            return "string";
-        case "symbol":
-            return "symbol";
-        case "function":
-            return "function";
-    }
-    // Check custom TypeOf symbol first
-    if (typeof (value as any)[TrhSymbols.TypeOf] === "function") {
-        const custom = (value as any)[TrhSymbols.TypeOf]();
-        if (typeof custom === "string") return custom;
-    }
-    if (Array.isArray(value)) return "array";
-    if (value instanceof Date) return "date";
-    if (value instanceof Set) return "set";
-    if (value instanceof Map) return "map";
-    if (value instanceof RegExp) return "regexp";
-    if (value instanceof Promise) return "promise";
-    if (value instanceof Error) return "error";
-    const tag = (value as any)[Symbol.toStringTag];
-    if (typeof tag === "string") return tag.toLowerCase();
-    return "object";
-}
-
-function convertToString(value: unknown): string | null {
-    if (value === null || value === undefined) return null;
-    switch (typeof value) {
-        case "string":
-            return value;
-        case "number":
-        case "bigint":
-            return value.toString();
-        case "boolean":
-            return null;
-    }
-    if (Array.isArray(value)) return null;
-    if (typeof (value as any).toString === "function" && (value as any).toString !== Object.prototype.toString) {
-        return (value as any).toString();
-    }
-    return null;
-}
-
-function sortCompare(a: unknown, b: unknown): number {
-    // 1. Compare symbol / native types
-    const cmp = compare(a, b);
-    if (cmp !== null) return cmp;
-
-    // 2. Numeric coercion
-    const numA = Number(a);
-    const numB = Number(b);
-    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-
-    // 3. String fallback
-    return collator.compare(String(a), String(b));
-}
-
-// --- Operator table ---
-
-const OPS: Record<string, (subject: any, operand: any, operand2?: any) => boolean> = {
-    "=": (s, o) => {
-        if (s != null && typeof s === "object" && TrhSymbols.Equals in s) {
-            const result = (s as any)[TrhSymbols.Equals](o);
-            if (result !== null) return result;
-        }
-        if (o != null && typeof o === "object" && TrhSymbols.Equals in o) {
-            const result = (o as any)[TrhSymbols.Equals](s);
-            if (result !== null) return result;
-        }
-        return s === o;
-    },
-    "==": (s, o) => s == o,
-    ">": (s, o) => {
-        const c = compare(s, o);
-        return c !== null && c > 0;
-    },
-    "<": (s, o) => {
-        const c = compare(s, o);
-        return c !== null && c < 0;
-    },
-    ">=": (s, o) => {
-        const c = compare(s, o);
-        return c !== null && c >= 0;
-    },
-    "<=": (s, o) => {
-        const c = compare(s, o);
-        return c !== null && c <= 0;
-    },
-    "%": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.includes(b);
-    },
-    "%^": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.toLowerCase().includes(b.toLowerCase());
-    },
-    "%_": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.startsWith(b);
-    },
-    "%^_": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.toLowerCase().startsWith(b.toLowerCase());
-    },
-    "_%": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.endsWith(b);
-    },
-    "_%^": (s, o) => {
-        const a = convertToString(s),
-            b = convertToString(o);
-        return a !== null && b !== null && a.toLowerCase().endsWith(b.toLowerCase());
-    },
-    "~": (s, o) => {
-        const str = convertToString(s);
-        if (str === null) return false;
-        try {
-            return (o instanceof RegExp ? o : new RegExp(o)).test(str);
-        } catch {
-            return false;
-        }
-    },
-    "#": (s, o) => (s != null && typeof s === "object" && TrhSymbols.Contains in s ? (s as any)[TrhSymbols.Contains](o) : Array.isArray(s) ? s.includes(o) : s instanceof Set ? s.has(o) : false),
-    ":": (s, o) => resolveTypeOf(s).startsWith(String(o)),
-    "><": (s, lo, hi) => {
-        const ord = compare(lo, hi);
-        if (ord === null) return false;
-        const [l, h] = ord <= 0 ? [lo, hi] : [hi, lo];
-        const cL = compare(s, l);
-        const cH = compare(s, h);
-        return cL !== null && cH !== null && cL > 0 && cH < 0;
-    },
-    ">=<": (s, lo, hi) => {
-        const ord = compare(lo, hi);
-        if (ord === null) return false;
-        const [l, h] = ord <= 0 ? [lo, hi] : [hi, lo];
-        const cL = compare(s, l);
-        const cH = compare(s, h);
-        return cL !== null && cH !== null && cL >= 0 && cH <= 0;
-    },
-};
-
-// Distributes keyof over union members: AllStringKeys<A | B> = keyof A | keyof B
-type AllStringKeys<T> = T extends any ? keyof T & string : never;
-
-// Safe lookup across union members: yields the value type where the key exists, undefined elsewhere
-type SafeLookup<T, K extends string> = T extends any ? (K extends keyof T ? T[K] : undefined) : never;
