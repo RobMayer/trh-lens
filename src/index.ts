@@ -230,8 +230,14 @@ const OPS: Record<string, (subject: any, operand: any, operand2?: any) => boolea
     },
     "#": (s, o) => (s != null && typeof s === "object" && TrhSymbols.Contains in s ? (s as any)[TrhSymbols.Contains](o) : Array.isArray(s) ? s.includes(o) : s instanceof Set ? s.has(o) : false),
     ":": (s, o) => resolveTypeOf(s).startsWith(String(o)),
-    "><": rangeOp((c) => c > 0, (c) => c < 0),
-    ">=<": rangeOp((c) => c >= 0, (c) => c <= 0),
+    "><": rangeOp(
+        (c) => c > 0,
+        (c) => c < 0,
+    ),
+    ">=<": rangeOp(
+        (c) => c >= 0,
+        (c) => c <= 0,
+    ),
 };
 
 //#endregion
@@ -363,7 +369,7 @@ function createProxy(state: LensState): any {
                             const arr = isEach ? (value as any[]).flat(1) : (value as any[]);
                             const mapped = (arr ?? [])
                                 .map((item: any) => {
-                                    const result = callback(wrapValue(item));
+                                    const result = callback(createProxy({ value: item, isEach: false, path: [], filters: [] }));
                                     const inner = (result as any)[LENS];
                                     return inner.isEach ? inner.value : [inner.value];
                                 })
@@ -421,7 +427,7 @@ function createProxy(state: LensState): any {
                 //#region - Filtering (accumulate in state.filters, don't record path steps)
                 case "where":
                     return (predFn: Function) => {
-                        const filterArr = (arr: any[]) => arr.filter((item) => evalPredicate(predFn(wrapValue(item))));
+                        const filterArr = (arr: any[]) => arr.filter((item) => evalPredicate(predFn(createProxy({ value: item, isEach: false, path: [], filters: [] }))));
                         const nextFilters = [...filters, { type: "where" as const, predFn }];
                         if (isEach) return createProxy({ value: (value as any[]).map((v) => filterArr(v)), isEach: true, path, filters: nextFilters });
                         return createProxy({ value: filterArr(value as any[]), isEach: false, path, filters: nextFilters });
@@ -514,8 +520,6 @@ function createProxy(state: LensState): any {
 
 //#region - Replay (mutate / apply)
 
-const wrapValue = (item: any): any => createProxy({ value: item, isEach: false, path: [], filters: [] });
-
 function parseSortArgs(args: any[]): { dir: string; nullish: string } {
     const dirOrConfig = args[1];
     return {
@@ -549,7 +553,7 @@ function resolveAtIndex(arr: any[], step: { index: number; filters?: FilterOp[] 
 }
 
 function resolveCallbackPath(step: { callback: Function }, item: any, steps: PathStep[], next: number): PathStep[] {
-    const elProxy = wrapValue(item);
+    const elProxy = createProxy({ value: item, isEach: false, path: [], filters: [] });
     const subResult = step.callback(elProxy);
     const subPath = (subResult as any)[LENS].path as PathStep[];
     return [...subPath, ...steps.slice(next)];
@@ -561,7 +565,7 @@ function matchingIndices(arr: any[], ops: FilterOp[]): number[] {
     for (const f of ops) {
         switch (f.type) {
             case "where":
-                indices = indices.filter((i) => evalPredicate(f.predFn(wrapValue(arr[i]))));
+                indices = indices.filter((i) => evalPredicate(f.predFn(createProxy({ value: arr[i], isEach: false, path: [], filters: [] }))));
                 break;
             case "filter":
                 indices = indices.filter((i) => (f.fn as Function)(arr[i]));
