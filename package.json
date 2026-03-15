@@ -2,6 +2,10 @@
     "name": "@trh/lens",
     "license": "UNLICENSE",
     "version": "1.0.1",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/RobMayer/trh-lens.git"
+    },
     "scripts": {
         "build": "tsup src/*.ts",
         "clean": "rm -rf ./dist",
