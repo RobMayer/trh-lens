@@ -167,12 +167,16 @@ export namespace Lens {
                   size(): DataLens<never, WrapEval<Eval, Chain, number>, number>;
               }
             : {}) &
-        // Custom accessors (LensNav — object protocol with select/mutate?/apply?)
+        // Custom accessors (LensNav — object protocol with access|compute + mutate?/apply?)
+        // access: deterministic navigation — usable on PathLens, DataLens, MutatorLens, ApplierLens
+        // compute: derived value — usable on DataLens only (always read-only, Target = never)
         (NonNullable<Chain> extends { [TrhSymbols.LensNav]: infer Methods }
             ? {
-                  [M in keyof Methods]: Methods[M] extends { select: (...args: infer A) => infer VT }
+                  [M in keyof Methods]: Methods[M] extends { access: (...args: infer A) => infer VT }
                       ? (...args: MapSelectorLensOf<A>) => DataLens<Methods[M] extends { mutate: any } | { apply: any } ? KeepTarget<Target, Chain, VT> : never, WrapEval<Eval, Chain, VT>, VT>
-                      : never;
+                      : Methods[M] extends { compute: (...args: infer A) => infer VT }
+                        ? (...args: MapSelectorLensOf<A>) => DataLens<never, WrapEval<Eval, Chain, VT>, VT>
+                        : never;
               }
             : {});
 
@@ -647,7 +651,8 @@ export namespace Lens {
                 if (typeof prop === "string") {
                     const customDispatch = (v: any): ((...args: any[]) => unknown) | undefined => {
                         const accessor = v?.[TrhSymbols.LensNav]?.[prop];
-                        return accessor && typeof accessor.select === "function" ? (...args: any[]) => accessor.select(...args) : undefined;
+                        const read = accessor?.access ?? accessor?.compute;
+                        return typeof read === "function" ? (...args: any[]) => read(...args) : undefined;
                     };
 
                     if (isEach) {
@@ -823,9 +828,10 @@ export namespace Lens {
             }
             case "custom": {
                 const accessor = current?.[TrhSymbols.LensNav]?.[step.prop];
-                if (accessor?.select) {
+                const read = accessor?.access ?? accessor?.compute;
+                if (read) {
                     const childCtx = { ...ctx, path: [...ctx.path, seg.acc(step.prop, ...step.args.map(String))] };
-                    const readValue = accessor.select(...step.args);
+                    const readValue = read(...step.args);
                     const newValue = doApply(readValue, steps, next, updater, childCtx);
                     return accessor.apply?.(newValue, ...step.args) ?? current;
                 }
@@ -893,9 +899,10 @@ export namespace Lens {
             }
             case "custom": {
                 const accessor = current?.[TrhSymbols.LensNav]?.[step.prop];
-                if (accessor?.select) {
+                const read = accessor?.access ?? accessor?.compute;
+                if (read) {
                     const childCtx = { ...ctx, path: [...ctx.path, seg.acc(step.prop, ...step.args.map(String))] };
-                    const readValue = accessor.select(...step.args);
+                    const readValue = read(...step.args);
                     if (atLeaf) accessor.mutate?.(updater(readValue, ctx.index, childCtx), ...step.args);
                     else accessor.mutate?.(doApply(readValue, steps, next, updater, childCtx), ...step.args);
                 }

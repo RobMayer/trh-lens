@@ -346,7 +346,7 @@ class Grid {
     get [TrhSymbols.LensNav]() {
         return {
             cell: {
-                select: (row: number, col: number) => this.cells[row][col],
+                access: (row: number, col: number) => this.cells[row][col],
                 mutate: (value: number, row: number, col: number) => {
                     this.cells[row][col] = value;
                 },
@@ -365,10 +365,13 @@ Lens.get(grid, $ => $("grid").cell(0, 1));
 Lens.mutate(grid, $ => $("grid").cell(0, 1), 42);
 ```
 
-Each accessor object needs:
-- `select(...args) => value` -- required, used for reading
-- `mutate(newValue, ...args)` -- optional, used by `Lens.mutate`
-- `apply(newValue, ...args) => newOwner` -- optional, used by `Lens.apply`
+Each accessor object needs one of:
+- `access(...args) => value` -- deterministic navigation, supports reading and mutation
+- `compute(...args) => value` -- derived/computed value, read-only (`Target = never`)
+
+And optionally (only meaningful with `access`):
+- `mutate(newValue, ...args)` -- used by `Lens.mutate`
+- `apply(newValue, ...args) => newOwner` -- used by `Lens.apply`
 
 ## Type System
 
