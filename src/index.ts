@@ -1,6 +1,6 @@
 import { TrhSymbols } from "@trh/symbols";
 
-export type LensPathSegment = { type: "property"; key: string } | { type: "index"; index: number } | { type: "accessor"; name: string; args?: unknown[] };
+type LensPathSegment = { type: "property"; key: string } | { type: "index"; index: number } | { type: "accessor"; name: string; args?: unknown[] };
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 type DeepReadonly<T> = T extends Primitive
@@ -20,88 +20,37 @@ const PRED = Symbol("pred");
 
 //#region - Public API
 
+type Context = { path: LensPathSegment[]; index: number; count: number };
+
 export namespace Lens {
-    export type Context = { path: LensPathSegment[]; index: number; count: number };
-
-    export const query = <D, R>(data: D, lens: ($: SelectorLens<D>) => SelectorLensOf<R>, meta?: { [key: string]: unknown }): R => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [], meta });
+    export const query = <D, R>(data: D, lens: ($: QueryLens<D>) => SelectorLensOf<R>): R => {
+        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
         const result = lens(proxy);
         return (result as any)[LENS].value;
     };
 
-    export const get = <D, R>(data: D, lens: ($: SelectorLens<D>) => SelectorLensOf<R>, meta?: { [key: string]: unknown }): R => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [], meta });
+    export const get = <D, R>(data: D, lens: ($: PathLens<D>) => PathLens<R>): R => {
+        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
         const result = lens(proxy);
         return (result as any)[LENS].value;
     };
 
-    export const mutate = <D, R>(data: D, lens: ($: MutatorLens<D>) => MutatorLensOf<R>, value: R | ((prev: R, index: number, context: Lens.Context) => R)): void => {
+    export const mutate = <D, R>(data: D, lens: ($: MutatorLens<D>) => MutatorLensOf<R>, value: R | ((prev: R, index: number, context: Context) => R)): void => {
         const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
         const result = lens(proxy as any);
         const { path } = (result as any)[LENS] as LensState;
         if (path.length === 0) return; // can't replace root by reference
-        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Lens.Context) => R) : () => value;
+        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Context) => R) : () => value;
         doMutate(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
     };
 
-    export const apply = <D, R>(data: D, lens: ($: ApplierLens<D>) => ApplierLensOf<R>, value: R | ((prev: DeepReadonly<R>, index: number, context: Lens.Context) => R)): D => {
+    export const apply = <D, R>(data: D, lens: ($: ApplierLens<D>) => ApplierLensOf<R>, value: R | ((prev: DeepReadonly<R>, index: number, context: Context) => R)): D => {
         const proxy = createProxy({ value: data, isEach: false, path: [], filters: [] });
         const result = lens(proxy as any);
         const { path } = (result as any)[LENS] as LensState;
-        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Lens.Context) => R) : () => value;
+        const updater = typeof value === "function" ? (value as (prev: R, index: number, context: Context) => R) : () => value;
         if (path.length === 0) return updater(data as any, 0, { path: [], index: 0, count: 1 }) as any;
         return doApply(data, path, 0, updater as any, { path: [], index: 0, count: 1 });
-    };
-
-    export const path = <D>(lens: ($: PathLens<D>) => PathLens<any>): LensPathSegment[] => {
-        const proxy = createProxy({ value: undefined, isEach: false, path: [], filters: [] });
-        const result = lens(proxy as any);
-        const steps = ((result as any)[LENS] as LensState).path;
-        return steps.map((step) => {
-            switch (step.type) {
-                case "prop":
-                    return seg.fromPropStep(step.key);
-                case "custom":
-                    return seg.acc(step.prop, ...step.args.map(String));
-                default:
-                    throw new Error(`Unexpected step type in PathLens: ${step.type}`);
-            }
-        });
-    };
-
-    /** Test whether data matches a predicate callback. Meta keys become virtual properties on `$`. */
-    export const match = (data: unknown, predFn: Function, meta?: { [key: string]: unknown }): boolean => {
-        const proxy = createProxy({ value: data, isEach: false, path: [], filters: [], meta });
-        return evalPredicate(predFn(proxy));
-    };
-
-    /** Probe a predicate callback to extract its structure (path, operator, operand). Returns null for non-indexable predicates. */
-    export const probe = (predFn: Function): { path: LensPathSegment[]; operator: string; operand: unknown; operand2?: unknown } | null => {
-        const probeProxy = createProxy({ value: undefined, isEach: false, path: [], filters: [] });
-        const pred = predFn(probeProxy);
-
-        // Must be a plain predicate tuple (not a PredicateResult from or/and/not/xor)
-        if (!Array.isArray(pred)) return null;
-        if (pred.length < 3) return null; // Unary — can't index
-
-        const subject = pred[0];
-        const subjectState = subject?.[LENS] as LensState | undefined;
-        if (!subjectState || subjectState.path.length === 0) return null;
-
-        // Convert internal path steps to public LensPathSegments
-        const probedPath: LensPathSegment[] = [];
-        for (const step of subjectState.path) {
-            if (step.type === "prop") probedPath.push(seg.fromPropStep(step.key));
-            else if (step.type === "custom") probedPath.push(seg.acc(step.prop, ...step.args.map(String)));
-            else return null; // Can't represent complex paths
-        }
-
-        const operator = pred[1] as string;
-        const operand = unwrapDeep(pred[2]);
-        if (pred.length === 4) {
-            return { path: probedPath, operator, operand, operand2: unwrapDeep(pred[3]) };
-        }
-        return { path: probedPath, operator, operand };
     };
 }
 
@@ -118,7 +67,7 @@ type PathStep =
     | { type: "mapGet"; key: unknown }
     | { type: "custom"; prop: string; args: unknown[] };
 
-type LensState = { value: unknown; isEach: boolean; path: PathStep[]; filters: FilterOp[]; meta?: { [key: string]: unknown } };
+type LensState = { value: unknown; isEach: boolean; path: PathStep[]; filters: FilterOp[] };
 
 //#endregion
 
@@ -138,12 +87,53 @@ function unwrapDeep(v: unknown): unknown {
     return v;
 }
 
-/** Internal predicate evaluator: handles PRED symbol + proxy unwrapping, delegates to pure evalPredicate. */
 function evalPredicate(pred: any): boolean {
-    // PredicateResult pass-through
+    // PredicateResult pass-through (from or/and/not/xor combinators)
     if (pred != null && typeof pred === "object" && PRED in pred) return (pred as any)[PRED];
     const tuple = (pred as unknown[]).map(unwrapDeep);
-    return evalPredicateRaw(tuple);
+
+    // Arity 2 — unary
+    if (tuple.length === 2) {
+        const val = tuple[0];
+        return tuple[1] === "?" ? !!val : !val;
+    }
+
+    const subject = tuple[0];
+    const rawOp = tuple[1] as string;
+
+    // Parse operator: !prefix, |/& suffix
+    let negate = false;
+    let mode: "single" | "any" | "all" = "single";
+    let base = rawOp;
+
+    if (base.startsWith("!")) {
+        negate = true;
+        base = base.slice(1);
+    }
+    if (base.endsWith("|")) {
+        mode = "any";
+        base = base.slice(0, -1);
+    } else if (base.endsWith("&")) {
+        mode = "all";
+        base = base.slice(0, -1);
+    }
+
+    const op = OPS[base];
+    if (!op) return false;
+
+    let result: boolean;
+
+    if (tuple.length === 4) {
+        result = op(subject, tuple[2], tuple[3]);
+    } else if (mode === "single") {
+        result = op(subject, tuple[2]);
+    } else {
+        const operands = tuple[2] as unknown[];
+        const method = mode === "any" ? "some" : "every";
+        result = operands[method]((o: unknown) => op(subject, o));
+    }
+
+    return negate ? !result : result;
 }
 
 //#endregion
@@ -180,11 +170,6 @@ function createProxy(state: LensState): any {
         get(_target, prop) {
             // Internal state extraction
             if (prop === LENS) return state;
-
-            // Meta injection ($.ID, $.DEPTH, etc.)
-            if (typeof prop === "string" && state.meta && prop in state.meta) {
-                return createProxy({ value: state.meta[prop], isEach: false, path: [], filters: [] });
-            }
 
             switch (prop) {
                 //#region - Universal
@@ -451,13 +436,12 @@ function matchingIndices(arr: any[], ops: FilterOp[]): number[] {
 }
 
 const seg = {
-    prop: (key: string): LensPathSegment => ({ type: "property", key }),
     idx: (index: number): LensPathSegment => ({ type: "index", index }),
     acc: (name: string, ...args: string[]): LensPathSegment => (args.length > 0 ? { type: "accessor", name, args } : { type: "accessor", name }),
-    fromPropStep: (key: string | number): LensPathSegment => (typeof key === "number" ? seg.idx(key) : seg.prop(key)),
+    fromPropStep: (key: string | number): LensPathSegment => (typeof key === "number" ? seg.idx(key) : { type: "property", key }),
 };
 
-function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Lens.Context) => any, ctx: Lens.Context): any {
+function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Context) => any, ctx: Context): any {
     if (idx >= steps.length) return updater(current, ctx.index, ctx);
 
     const step = steps[idx];
@@ -539,13 +523,13 @@ function doApply(current: any, steps: PathStep[], idx: number, updater: (prev: a
     }
 }
 
-function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Lens.Context) => any, ctx: Lens.Context): void {
+function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: any, index: number, ctx: Context) => any, ctx: Context): void {
     const step = steps[idx];
     const next = idx + 1;
     const atLeaf = next >= steps.length;
 
     // For plain property/index steps, descend or apply at leaf
-    const descend = (parent: any, key: string | number, childCtx: Lens.Context) => {
+    const descend = (parent: any, key: string | number, childCtx: Context) => {
         if (atLeaf) parent[key] = updater(parent[key], childCtx.index, childCtx);
         else doMutate(parent[key], steps, next, updater, childCtx);
     };
@@ -622,7 +606,7 @@ function doMutate(current: any, steps: PathStep[], idx: number, updater: (prev: 
 
 //#endregion
 
-export type SortDirection = "asc" | "desc" | { direction: "asc" | "desc"; nullish?: "first" | "last" };
+type SortDirection = "asc" | "desc" | { direction: "asc" | "desc"; nullish?: "first" | "last" };
 
 //#region - Unified DataLens
 
@@ -631,7 +615,7 @@ export type SortDirection = "asc" | "desc" | { direction: "asc" | "desc"; nullis
 //   Eval   = what Lens.get returns (tracks array wrapping from each())
 //   Chain  = current navigation type (what properties/methods are available)
 
-export type DataLens<Target, Eval = Target, Chain = Eval> = {
+type DataLens<Target, Eval = Target, Chain = Eval> = {
     readonly [BRAND_TARGET]: Target;
     readonly [BRAND_EVAL]: Eval;
 
@@ -745,7 +729,7 @@ export type MutatorLensOf<E> = { readonly [BRAND_TARGET]: E; readonly [BRAND_REA
 export type ApplierLensOf<E> = { readonly [BRAND_TARGET]: E; readonly [BRAND_READONLY]?: never };
 
 // Backward compatibility aliases — all three are now DataLens
-export type SelectorLens<Eval, Chain = Eval> = DataLens<Eval, Eval, Chain>;
+export type QueryLens<Eval, Chain = Eval> = DataLens<Eval, Eval, Chain>;
 export type MutatorLens<Target, Chain = Target> = DataLens<Target, Target, Chain>;
 export type ApplierLens<Target, Chain = Target> = DataLens<Target, Target, Chain>;
 
@@ -784,9 +768,9 @@ export type PathLens<T> = {
 
 // Result of a combinator expression — opaque marker type
 declare const PREDICATE_BRAND: unique symbol;
-export type PredicateResult = { readonly [PREDICATE_BRAND]: true };
+type PredicateResult = { readonly [PREDICATE_BRAND]: true };
 
-export type LogicalOps = {
+type LogicalOps = {
     or(...conditions: (Predicate<any> | PredicateResult)[]): PredicateResult;
     and(...conditions: (Predicate<any> | PredicateResult)[]): PredicateResult;
     not(condition: Predicate<any> | PredicateResult): PredicateResult;
@@ -835,7 +819,7 @@ type TypeofAnyOfOp = ":|" | "!:|";
 type UnaryOp = "?" | "!?";
 
 // A = 2: unary ops; A = 3: standard ops; A = 4: range ops only
-export type OperatorFor<O, A extends 2 | 3 | 4> = A extends 4
+type OperatorFor<O, A extends 2 | 3 | 4> = A extends 4
     ? O extends number | bigint | string | TrhSymbols.Comparable
         ? RangeOp
         : never
@@ -856,7 +840,7 @@ export type OperatorFor<O, A extends 2 | 3 | 4> = A extends 4
 type AnyOfOp = EqualityAnyOfOp | StringAnyOfOp | StringAllOfOp | RegexAnyOfOp | RegexAllOfOp | HasAnyOfOp | HasAllOfOp | TypeofAnyOfOp;
 
 // Map from operator to valid operand type
-export type OperandFor<O, Op> =
+type OperandFor<O, Op> =
     // Typeof: RHS is string
     Op extends TypeofOp
         ? string
@@ -870,29 +854,29 @@ export type OperandFor<O, Op> =
               : // Array contains: RHS is element type
                 Op extends HasOp
                 ? O extends (infer E)[]
-                    ? E | SelectorLens<E>
+                    ? E | QueryLens<E>
                     : O extends Set<infer E>
-                      ? E | SelectorLens<E>
+                      ? E | QueryLens<E>
                       : O extends TrhSymbols.Containable<infer E>
-                        ? E | SelectorLens<E>
+                        ? E | QueryLens<E>
                         : never
                 : Op extends HasAnyOfOp | HasAllOfOp
                   ? O extends (infer E)[]
-                      ? (E | SelectorLens<E>)[]
+                      ? (E | QueryLens<E>)[]
                       : O extends Set<infer E>
-                        ? (E | SelectorLens<E>)[]
+                        ? (E | QueryLens<E>)[]
                         : O extends TrhSymbols.Containable<infer E>
-                          ? (E | SelectorLens<E>)[]
+                          ? (E | QueryLens<E>)[]
                           : never
                   : // Any-of / all-of: RHS is array of O
                     Op extends AnyOfOp
-                    ? (O | SelectorLens<O>)[]
+                    ? (O | QueryLens<O>)[]
                     : // Default: RHS is O
-                          O | SelectorLens<O>;
+                          O | QueryLens<O>;
 
 // --- The Predicate tuple ---
 
-export type Predicate<O> =
+type Predicate<O> =
     | [subject: O | SelectorLensOf<O>, op: NoInfer<OperatorFor<O, 2>>]
     | [subject: O | SelectorLensOf<O>, op: NoInfer<OperatorFor<O, 3>>, operand: NoInfer<OperandFor<O, OperatorFor<O, 3>>> | SelectorLensOf<any>]
     | [
@@ -924,21 +908,6 @@ function compare(a: unknown, b: unknown): number | null {
     if (typeof a === "string" && typeof b === "string") return collator.compare(a, b);
     // 5. Incomparable types
     return null;
-}
-
-function performEquality(a: unknown, b: unknown): boolean {
-    // 1. Left-side Equals symbol
-    if (a != null && typeof a === "object" && TrhSymbols.Equals in a) {
-        const result = (a as any)[TrhSymbols.Equals](b);
-        if (result !== null) return result;
-    }
-    // 2. Right-side Equals symbol
-    if (b != null && typeof b === "object" && TrhSymbols.Equals in b) {
-        const result = (b as any)[TrhSymbols.Equals](a);
-        if (result !== null) return result;
-    }
-    // 3. Strict equality fallback
-    return a === b;
 }
 
 function resolveTypeOf(value: unknown): string {
@@ -993,7 +962,7 @@ function convertToString(value: unknown): string | null {
     return null;
 }
 
-export function sortCompare(a: unknown, b: unknown): number {
+function sortCompare(a: unknown, b: unknown): number {
     // 1. Compare symbol / native types
     const cmp = compare(a, b);
     if (cmp !== null) return cmp;
@@ -1010,7 +979,17 @@ export function sortCompare(a: unknown, b: unknown): number {
 // --- Operator table ---
 
 const OPS: Record<string, (subject: any, operand: any, operand2?: any) => boolean> = {
-    "=": (s, o) => performEquality(s, o),
+    "=": (s, o) => {
+        if (s != null && typeof s === "object" && TrhSymbols.Equals in s) {
+            const result = (s as any)[TrhSymbols.Equals](o);
+            if (result !== null) return result;
+        }
+        if (o != null && typeof o === "object" && TrhSymbols.Equals in o) {
+            const result = (o as any)[TrhSymbols.Equals](s);
+            if (result !== null) return result;
+        }
+        return s === o;
+    },
     "==": (s, o) => s == o,
     ">": (s, o) => {
         const c = compare(s, o);
@@ -1086,56 +1065,6 @@ const OPS: Record<string, (subject: any, operand: any, operand2?: any) => boolea
         return cL !== null && cH !== null && cL >= 0 && cH <= 0;
     },
 };
-
-// --- Predicate evaluation ---
-
-/** Evaluate a predicate tuple to boolean. Expects already-unwrapped values (no Lens proxies). */
-export function evalPredicateRaw(tuple: unknown[]): boolean {
-    // Arity 2 — unary
-    if (tuple.length === 2) {
-        const val = tuple[0];
-        return tuple[1] === "?" ? !!val : !val;
-    }
-
-    const subject = tuple[0];
-    const rawOp = tuple[1] as string;
-
-    // Parse operator: !prefix, |/& suffix
-    let negate = false;
-    let mode: "single" | "any" | "all" = "single";
-    let base = rawOp;
-
-    if (base.startsWith("!")) {
-        negate = true;
-        base = base.slice(1);
-    }
-    if (base.endsWith("|")) {
-        mode = "any";
-        base = base.slice(0, -1);
-    } else if (base.endsWith("&")) {
-        mode = "all";
-        base = base.slice(0, -1);
-    }
-
-    const op = OPS[base];
-    if (!op) return false;
-
-    let result: boolean;
-
-    if (tuple.length === 4) {
-        // Range op — two operands
-        result = op(subject, tuple[2], tuple[3]);
-    } else if (mode === "single") {
-        result = op(subject, tuple[2]);
-    } else {
-        // any-of or all-of — operand is an array
-        const operands = tuple[2] as unknown[];
-        const method = mode === "any" ? "some" : "every";
-        result = operands[method]((o: unknown) => op(subject, o));
-    }
-
-    return negate ? !result : result;
-}
 
 // Distributes keyof over union members: AllStringKeys<A | B> = keyof A | keyof B
 type AllStringKeys<T> = T extends any ? keyof T & string : never;
