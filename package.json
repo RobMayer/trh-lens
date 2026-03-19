@@ -1,5 +1,15 @@
 {
     "name": "@trh/lens",
+    "description": "Type-safe lens library for deep data access, mutation, and immutable updates via a proxy-based path DSL",
+    "keywords": [
+        "lens",
+        "immutable",
+        "deep",
+        "proxy",
+        "path",
+        "functional",
+        "traversal"
+    ],
     "license": "UNLICENSE",
     "version": "1.0.1",
     "repository": {
