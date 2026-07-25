@@ -17,7 +17,7 @@
         "url": "git+https://github.com/RobMayer/trh-lens.git"
     },
     "scripts": {
-        "build": "tsup src/*.ts",
+        "build": "tsdown src/*.ts",
         "clean": "rm -rf ./dist",
         "lint": "tsc"
     },
@@ -35,7 +35,7 @@
     },
     "packageManager": "pnpm@10.6.4+sha512.da3d715bfd22a9a105e6e8088cfc7826699332ded60c423b14ec613a185f1602206702ff0fe4c438cb15c979081ce4cb02568e364b15174503a63c7a8e2a5f6c",
     "devDependencies": {
-        "tsup": "^8.5.1",
+        "tsdown": "^0.22.14",
         "typescript": "^5.9.3"
     },
     "dependencies": {
