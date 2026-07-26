@@ -25,7 +25,5 @@ jobs:
               run: npm install -g npm@latest
             - name: Install Dependencies
               run: pnpm install --frozen-lockfile
-            - name: Lint and Build
-              run: pnpm run lint && pnpm run build
-            - name: Publish
+            - name: Lint, Build, and Publish
               run: npm publish --access public --provenance

@@ -11,42 +11,44 @@
         "traversal"
     ],
     "license": "UNLICENSE",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "repository": {
         "type": "git",
         "url": "git+https://github.com/RobMayer/trh-lens.git"
     },
     "scripts": {
-        "build": "tsdown src/*.ts",
+        "build": "tsdown",
         "clean": "rm -rf ./dist",
-        "lint": "tsc"
+        "lint": "tsc --noEmit",
+        "prepublishOnly": "tsc --noEmit && rm -rf ./dist && tsdown"
     },
     "files": [
         "./dist"
     ],
-    "main": "dist/index.js",
+    "type": "module",
+    "main": "dist/index.cjs",
     "module": "dist/index.mjs",
-    "types": "dist/index.d.ts",
+    "types": "dist/index.d.cts",
     "exports": {
         ".": {
-            "import": "./dist/index.mjs",
-            "require": "./dist/index.js"
+            "import": {
+                "types": "./dist/index.d.mts",
+                "default": "./dist/index.mjs"
+            },
+            "require": {
+                "types": "./dist/index.d.cts",
+                "default": "./dist/index.cjs"
+            }
         }
     },
     "packageManager": "pnpm@10.6.4+sha512.da3d715bfd22a9a105e6e8088cfc7826699332ded60c423b14ec613a185f1602206702ff0fe4c438cb15c979081ce4cb02568e364b15174503a63c7a8e2a5f6c",
     "devDependencies": {
         "tsdown": "^0.22.14",
-        "typescript": "^5.9.3"
+        "typescript": "^7",
+        "eslint": "^10.8",
+        "typescript-eslint": "^8.65.0"
     },
     "dependencies": {
-        "@trh/symbols": "^2.0.1"
-    },
-    "pnpm": {
-        "ignoredBuiltDependencies": [
-            "esbuild"
-        ],
-        "onlyBuiltDependencies": [
-            "esbuild"
-        ]
+        "@trh/symbols": "^2.2.0"
     }
 }
